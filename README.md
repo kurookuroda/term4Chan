@@ -1,3 +1,12 @@
+
+apt-get update -qq && apt-get install -y -qq libaa1
+
+
+
+
+
+
+---------
 **Note:** This project is not actively maintained. Last tested on 3.8.10
 
 4Chan BBS
