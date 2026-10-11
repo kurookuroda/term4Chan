@@ -282,24 +282,31 @@ class Console:
         posts = data.get('posts') if isinstance(data, dict) else None
         return posts or None
 
-    def _view_thread(self, board: str, thread_id) -> None:
+    def _view_thread(self, board: str, thread_id) -> bool:
+        """スレッドを順に表示する。取得できなければ False(閲覧は始まらない)。"""
         posts = self._fetch_posts(board, thread_id)
         if not posts:
-            print('Communication error or invalid board/thread ID...')
-            return
+            print(f'Could not load /{board}/ {thread_id} '
+                  '(deleted, not found, or a communication error).')
+            return False
 
+        # 閲覧中だけ「今見ているスレッド」にし、終わったら元の状態に戻す
+        previous = self._current
         self._current = (board, str(thread_id))
-        total = len(posts)
-        for i, post in enumerate(posts, 1):
-            self._show_post(board, post, f'{i}/{total}  thread {thread_id}')
-            label = f'/{board}/ {thread_id}  {i}/{total}'
+        try:
+            total = len(posts)
+            for i, post in enumerate(posts, 1):
+                self._show_post(board, post, f'{i}/{total}  thread {thread_id}')
+                label = f'/{board}/ {thread_id}  {i}/{total}'
 
-            if i < total:
-                if self._prompt(label, HINT_THREAD) == 'quit':
-                    return
-            else:
-                self._prompt(label, HINT_LAST)  # 最後はどの入力でも戻る
-                return
+                if i < total:
+                    if self._prompt(label, HINT_THREAD) == 'quit':
+                        break
+                else:
+                    self._prompt(label, HINT_LAST)  # 最後はどの入力でも戻る
+        finally:
+            self._current = previous
+        return True
 
     # ---- コマンド
 
@@ -332,13 +339,21 @@ class Console:
             print('Communication error or invalid board ID...')
             return
 
-        pages = int(info.get('pages', 1))
+        previous = self._current
+        try:
+            if self._list_threads(board_id, int(info.get('pages', 1))):
+                print('(end of board)')
+        finally:
+            self._current = previous  # 一覧を出たら、IDの表示も消える
+
+    def _list_threads(self, board_id: str, pages: int) -> bool:
+        """スレッド一覧を順に表示する。最後まで進めば True、q や通信エラーなら False。"""
         for page in range(1, pages + 1):
             data = self._server.getThreads(board_id, page)
             threads = data.get('threads') if isinstance(data, dict) else None
             if not threads:
                 print('Communication error...')
-                return
+                return False
 
             for thread in threads:
                 posts = thread.get('posts') or []
@@ -350,13 +365,14 @@ class Console:
                                 f"replies: {op.get('replies', 0)}  thread {op['no']}")
 
                 label = f"/{board_id}/ {op['no']}  page {page}/{pages}"
-                answer = self._prompt(label, HINT_LIST, allow_open=True)
-                if answer == 'quit':
-                    return
-                if answer == 'open':
-                    self._view_thread(board_id, op['no'])
-
-        print('(end of board)')
+                while True:
+                    answer = self._prompt(label, HINT_LIST, allow_open=True)
+                    if answer == 'quit':
+                        return False
+                    if answer == 'open' and not self._view_thread(board_id, op['no']):
+                        continue  # 開けなかったら、同じスレッドの入力に戻る
+                    break
+        return True
 
     def command_getreplies(self, params: list) -> None:
         """gr <boardID> <threadID>: スレッドのレスを順に表示する。"""
@@ -509,6 +525,9 @@ class Console:
                     break
             except KeyboardInterrupt:
                 print('\n(interrupted)')
+            except Exception as ex:
+                logging.exception('Unexpected error in command %s', self._cmd)
+                print(f'Error: {type(ex).__name__}: {ex}')
 
 
 def main() -> None:
