@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -20,6 +21,8 @@ from htmlcleaner import strip_tags
 # Webhookへの送信間隔(秒)。これより短くはできない。
 MIN_INTERVAL = 3.0
 MAX_RETRIES = 5
+# 同じWebhookが連続でこの回数失敗したら、そのジョブでは送信を打ち切る
+MAX_CONSECUTIVE_FAILURES = 5
 DISCORD_LIMIT = 2000
 CHUNK_SIZE = 1900
 BOARD_BASE = 'https://boards.4chan.org'
@@ -166,30 +169,65 @@ def broadcast_posts(
     interval: float = MIN_INTERVAL,
     on_progress: Callable[[int, int, dict], None] | None = None,
     thread_id=None,
+    cancel: threading.Event | None = None,
+    failures: dict[str, list[int]] | None = None,
 ) -> dict[str, list[int]]:
     """投稿を1件ずつ全URLへ順にブロードキャストする。
 
+    cancel がセットされたら、いま送っている1件が終わったところで止める。
+    failures に dict を渡すと、送信中でもそこから失敗の状況を見られる。
     戻り値は {webhook_url: [送信に失敗したpost no のリスト]}。
     """
     interval = max(interval, MIN_INTERVAL)
-    failures: dict[str, list[int]] = {u: [] for u in urls}
+    if failures is None:
+        failures = {}
+    for u in urls:
+        failures.setdefault(u, [])
+    streak = {u: 0 for u in urls}
+    dead: set[str] = set()
+
+    def stopped() -> bool:
+        return cancel is not None and cancel.is_set()
 
     with requests.Session() as session:
         for i, post in enumerate(posts, 1):
+            if stopped():
+                break
             content = format_post(board, post, include_images, thread_id)
 
+            interrupted = False
             for url in urls:
+                if stopped():
+                    interrupted = True
+                    break
+                if url in dead:
+                    failures[url].append(post.get('no'))
+                    continue
                 try:
                     send_to_webhook(session, url, content, interval)
+                    streak[url] = 0
                 except Exception as ex:
                     failures[url].append(post.get('no'))
+                    streak[url] += 1
                     logger.warning('送信失敗 %s #%s: %s',
                                    mask_url(url), post.get('no'), ex)
+                    if streak[url] >= MAX_CONSECUTIVE_FAILURES:
+                        dead.add(url)
+                        logger.warning('%s: %d回連続で失敗したため、送信を打ち切ります',
+                                       mask_url(url), streak[url])
+            if interrupted:
+                break
 
             if on_progress:
                 on_progress(i, len(posts), post)
 
+            if len(dead) == len(urls):
+                break  # 全Webhookが使えないので、続けても無駄
+
             if i < len(posts):
-                time.sleep(interval)
+                if cancel is not None:
+                    cancel.wait(interval)  # 中止されたらすぐ起きる
+                else:
+                    time.sleep(interval)
 
     return failures
