@@ -1,12 +1,57 @@
-
+```
 apt-get update -qq && apt-get install -y -qq libaa1
+```
 
-
+```
 python3 cli.py
+```
+
+### usage
+listboards, lb:
+    list available boards.
+        ex: lb
+
+listthreads, lt:
+    list the threads in a board. lt <board name>
+        ex: lt b
+
+getreplies, gr:
+    list replies to a thread. gr <board name> <threadID>
+        ex: gr a 115931903
+
+webhook, wh:
+    send a thread to the Discord webhooks in config.webhook_file.
+    Images are sent as URLs. Numbers start at 1 (1 = the first post)
+    and a range includes both ends.
+        wh                  the thread you are viewing (all posts)
+        wh 1                only post 1
+        wh 3-10             posts 3 to 10
+        wh 5-               post 5 to the last
+        wh <board> <threadID> [range]    a thread given explicitly
+    Each message ends with the thread URL (a link to that post).
+    Options: --no-images (no image URLs), --no-url (no thread URL),
+             --dry-run (print only)
+        ex: wh a 115931903 3-10 --dry-run
+
+info, i:
+    show the current board / thread.
+
+disableimages, di / enableimages, ei:
+    turn the thumbnail display off / on.
+
+help, h:
+    shows this message
+
+exit, quit, q:
+    exits the program
+
+While viewing threads or replies (the [/board/ threadID ...] prompt):
+    Enter or n  next          o  open the thread (thread list only)
+    wh [range]  send          h  help           i  current thread
+    q           back'''
 
 
 ```
----------
 **Note:** This project is not actively maintained. Last tested on 3.8.10
 
 4Chan BBS
