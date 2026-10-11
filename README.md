@@ -7,6 +7,7 @@ python3 cli.py
 ```
 
 ### usage
+```
 listboards, lb:
     list available boards.
         ex: lb
@@ -48,7 +49,11 @@ exit, quit, q:
 While viewing threads or replies (the [/board/ threadID ...] prompt):
     Enter or n  next          o  open the thread (thread list only)
     wh [range]  send          h  help           i  current thread
-    q           back'''
+    q           back
+```
+
+
+
 
 
 ```
