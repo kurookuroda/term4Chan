@@ -16,6 +16,7 @@ except ImportError:
     readline = None
 
 import chanjson
+import sendqueue
 import webhook
 from config import config
 from htmlcleaner import strip_tags
@@ -39,7 +40,7 @@ HINT_LAST = 'End of thread | wh - Send | h - Help | Enter/q - Back'
 HELP_SHORT = '''
 Usage: COMMAND {board} {thread}
 
-    where COMMAND := {lb, lt, gr, wh, i, di, ei, h, q}
+    where COMMAND := {lb, lt, gr, wh, jobs, stop, i, di, ei, h, q}
 '''
 
 HELP_LONG = '''Commands -> (<name>, <alias>): usage
@@ -68,6 +69,15 @@ webhook, wh:
     Options: --no-images (no image URLs), --no-url (no thread URL),
              --dry-run (print only)
         ex: wh a 115931903 3-10 --dry-run
+    Sending runs in the background, so you can keep using other commands.
+    Jobs are processed one at a time (3+ seconds between messages).
+
+jobs:
+    list the sending jobs and their progress / failures.
+
+stop <jobNo>:
+    stop a job after the message being sent now (a queued job is cancelled).
+    With no number, stops the only active job.
 
 info, i:
     show the current board / thread.
@@ -84,6 +94,7 @@ exit, quit, q:
 While viewing threads or replies (the [/board/ threadID ...] prompt):
     Enter or n  next          o  open the thread (thread list only)
     wh [range]  send          h  help           i  current thread
+    jobs        progress      stop [n]  stop a job
     q           back'''
 
 _RANGE_RE = re.compile(r'^(\d+)(?:(-)(\d*))?$')
@@ -163,12 +174,16 @@ class Console:
         self._cmd: str = ''
         # 最後に見たスレッド (板ID, スレッドID)。引数なしの wh の対象になる
         self._current: tuple[str, str] | None = None
+        # Webhook送信はバックグラウンドのスレッドで、1本ずつ順番に処理する
+        self._sender = sendqueue.SendQueue(self._notify)
 
         self._commands = {
             'listboards': self.command_listboards,
             'listthreads': self.command_listthreads,
             'getreplies': self.command_getreplies,
             'webhook': self.command_webhook,
+            'jobs': self.command_jobs,
+            'stop': self.command_stop,
             'info': self.command_info,
             'enableimages': self.command_enableimages,
             'disableimages': self.command_disableimages,
@@ -199,6 +214,15 @@ class Console:
             return (height * 2, height)  # 文字は縦長なので幅を2倍に
         return (config.img_width, config.img_hight)
 
+    def _notify(self, message: str) -> None:
+        """バックグラウンドの送信スレッドからの通知。入力中の行を再描画する。"""
+        print(f'\n{message}')
+        if readline is not None:
+            try:
+                readline.redisplay()
+            except Exception:
+                pass
+
     # ---- プロンプト
 
     def _main_prompt(self) -> str:
@@ -219,7 +243,8 @@ class Console:
         """
         while True:
             parts = ask(f'[{label}] {hint}: ',
-                        keep=('wh', 'webhook', 'h', 'help', 'i', 'info')).split()
+                        keep=('wh', 'webhook', 'h', 'help', 'i', 'info',
+                              'jobs', 'stop')).split()
             cmd = parts[0] if parts else ''
 
             if cmd in ('', 'n'):
@@ -238,8 +263,13 @@ class Console:
                 print(HELP_LONG)
             elif cmd in ('i', 'info'):
                 self.command_info([])
+            elif cmd == 'jobs':
+                self.command_jobs([])
+            elif cmd == 'stop':
+                self.command_stop(parts[1:])
             else:
-                choices = 'Enter/n, ' + ('o, ' if allow_open else '') + 'q, wh, h, i'
+                choices = ('Enter/n, ' + ('o, ' if allow_open else '')
+                           + 'q, wh, jobs, stop, h, i')
                 print(f'Unknown input: {cmd}  ({choices})')
 
     # ---- 表示
@@ -459,22 +489,54 @@ class Console:
             print('Cancelled.')
             return
 
-        def on_progress(i: int, count: int, post: dict) -> None:
-            print(f"[{i}/{count}] #{post.get('no')}")
+        job, ahead = self._sender.submit(
+            board, thread_id, start, end, selected, urls,
+            include_images, url_thread is not None, interval)
+        if ahead:
+            print(f'Job {job.id} queued ({ahead} job(s) ahead). '
+                  'Check progress with: jobs')
+        else:
+            print(f'Job {job.id} started in the background. '
+                  'Check progress with: jobs')
 
-        failures = webhook.broadcast_posts(
-            urls, board, selected, include_images, interval, on_progress,
-            thread_id=url_thread)
-
-        failed = {u: nums for u, nums in failures.items() if nums}
-        if not failed:
-            print('Done.')
+    def command_jobs(self, params: list) -> None:
+        jobs = self._sender.jobs
+        if not jobs:
+            print('No jobs.')
             return
-        print('Failed:')
-        for url, nums in failed.items():
-            print(f'  {webhook.mask_url(url)}: {len(nums)} post(s) '
-                  f'({", ".join(str(n) for n in nums[:10])}'
-                  f'{" ..." if len(nums) > 10 else ""})')
+        for job in jobs:
+            line = (f'Job {job.id}  {job.state:<8} /{job.board}/ {job.thread_id}  '
+                    f'posts {job.start}-{job.end}  {job.processed}/{job.total}')
+            if job.failed_posts:
+                line += f'  ({job.failed_posts} failed)'
+            print(line)
+            if job.error:
+                print(f'    {job.error}')
+            for url, nums in job.failures.items():
+                if nums:
+                    shown = ', '.join(f'#{n}' for n in nums[:5])
+                    more = ' ...' if len(nums) > 5 else ''
+                    print(f'    {webhook.mask_url(url)}: {len(nums)} failed ({shown}{more})')
+
+    def command_stop(self, params: list) -> None:
+        """stop [jobNo]: ジョブを中止する(番号なしは、動いているジョブが1つのときだけ)。"""
+        if params:
+            try:
+                job_id = int(params[0])
+            except ValueError:
+                print('Usage: stop [jobNo]')
+                return
+        else:
+            active = self._sender.active_jobs()
+            if len(active) != 1:
+                print('Usage: stop <jobNo>' if active else 'No active jobs.')
+                return
+            job_id = active[0].id
+
+        if self._sender.stop(job_id):
+            print(f'Stopping job {job_id} ...')
+        else:
+            print(f'Job {job_id} is not active.')
 
     def command_enableimages(self, params: list) -> None:
         print('Images have been enabled')
@@ -484,7 +546,13 @@ class Console:
         print('Images have been disabled')
         self._show_images = False
 
-    def command_exit(self, params: list) -> bool:
+    def command_exit(self, params: list):
+        active = self._sender.active_jobs()
+        if active:
+            desc = ', '.join(f'Job {j.id} {j.processed}/{j.total}' for j in active)
+            if ask(f'Sending in progress ({desc}). Quit anyway? [y/N]: ') != 'y':
+                return None  # 終了せず、プロンプトに戻る
+            self._sender.cancel_all()
         print('good bye')
         return True
 
@@ -497,6 +565,7 @@ class Console:
         print(config.welcome_message)
         print('    gr <boardID> <threadID> - Show the replies of a thread')
         print('    wh [range]              - Send the thread you are viewing to Discord')
+        print('    jobs / stop [n]         - Check / stop background sending')
         print('    i                       - Show the current board / thread')
         print('    q                       - Quit (history: up/down arrows)\n')
 
@@ -505,6 +574,7 @@ class Console:
                 line = input(self._main_prompt())
             except EOFError:
                 print()
+                self._sender.cancel_all()
                 break
             except KeyboardInterrupt:
                 print()
@@ -533,9 +603,11 @@ class Console:
 def main() -> None:
     setup_history()
     server = chanjson.ChanServer()
+    console = Console(server)
     try:
-        Console(server).run()
+        console.run()
     finally:
+        console._sender.cancel_all()
         server.close_session()
 
 
