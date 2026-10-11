@@ -2,10 +2,10 @@
 apt-get update -qq && apt-get install -y -qq libaa1
 
 
+python3 cli.py
 
 
-
-
+```
 ---------
 **Note:** This project is not actively maintained. Last tested on 3.8.10
 
@@ -64,3 +64,4 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 See <http://www.gnu.org/licenses/> for the full license.
+```
